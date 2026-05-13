@@ -1,0 +1,7 @@
+{
+    "participants": ["Raphael Moraes"],
+    "social": ["https://github.com/mdrapha"],
+    "source-code-repo": "https://github.com/mdrapha/rinha-de-backend-2026",
+    "stack": ["rust", "axum", "nginx"],
+    "open_to_work": true
+}

@@ -1,0 +1,23 @@
+[package]
+name = "rinha-backend-2026"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "rinha"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.7"
+tokio = { version = "1", features = ["rt", "net"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+half = "2"
+flate2 = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
