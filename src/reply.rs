@@ -8,7 +8,8 @@ pub const FRAUD_RESPONSES: [&[u8]; 6] = [
 ];
 
 pub const FRAUD_FALLBACK: &[u8] = FRAUD_RESPONSES[0];
-pub const READY: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+pub const READY: &[u8] =
+    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 pub const NOT_FOUND: &[u8] = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
 pub const BAD_REQUEST: &[u8] =
     b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";

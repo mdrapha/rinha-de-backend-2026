@@ -24,6 +24,31 @@ fn find_header_end(buf: &[u8]) -> Option<usize> {
 }
 
 #[inline(always)]
+fn scheme_http_prefix(s: &[u8]) -> Option<usize> {
+    const HTTP: &[u8] = b"http://";
+    const HTTPS: &[u8] = b"https://";
+    if s.len() >= HTTPS.len() && s[..HTTPS.len()].eq_ignore_ascii_case(HTTPS) {
+        return Some(HTTPS.len());
+    }
+    if s.len() >= HTTP.len() && s[..HTTP.len()].eq_ignore_ascii_case(HTTP) {
+        return Some(HTTP.len());
+    }
+    None
+}
+
+#[inline(always)]
+fn request_target_path(rest: &[u8]) -> &[u8] {
+    if let Some(skip) = scheme_http_prefix(rest) {
+        let after = &rest[skip..];
+        return match memchr::memchr(b'/', after) {
+            Some(i) => &after[i..],
+            None => b"/",
+        };
+    }
+    rest
+}
+
+#[inline(always)]
 fn extract_content_length(headers: &[u8]) -> Option<usize> {
     const N: usize = 15;
     if headers.len() < N {
@@ -83,7 +108,7 @@ fn parse_request(buf: &[u8]) -> Request {
     let line = &buf[..line_end];
 
     if line.starts_with(b"POST ") {
-        let rest = &line[5..];
+        let rest = request_target_path(&line[5..]);
         if path_matches(rest, b"/fraud-score") {
             let cl = extract_content_length(&buf[line_end..header_end]).unwrap_or(0);
             let body_start = header_end + 4;
@@ -96,8 +121,16 @@ fn parse_request(buf: &[u8]) -> Request {
         return Request::NotFound { consumed: header_end + 4 };
     }
 
+    if line.starts_with(b"HEAD ") {
+        let rest = request_target_path(&line[5..]);
+        if path_matches(rest, b"/ready") {
+            return Request::HealthCheck { consumed: header_end + 4 };
+        }
+        return Request::NotFound { consumed: header_end + 4 };
+    }
+
     if line.starts_with(b"GET ") {
-        let rest = &line[4..];
+        let rest = request_target_path(&line[4..]);
         if path_matches(rest, b"/ready") {
             return Request::HealthCheck { consumed: header_end + 4 };
         }
