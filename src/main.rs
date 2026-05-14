@@ -11,7 +11,7 @@ use mimalloc::MiMalloc;
 use monoio::buf::IoBufMut;
 use monoio::io::AsyncReadRent;
 use monoio::net::{ListenerOpts, TcpStream, UnixListener};
-use monoio::{IoUringDriver, RuntimeBuilder};
+use monoio::{FusionDriver, RuntimeBuilder};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::{FromRawFd, RawFd};
 use std::os::unix::net::UnixStream as StdUnixStream;
@@ -45,7 +45,7 @@ fn main() -> std::io::Result<()> {
         std::thread::spawn(move || socket::control_thread(ctrl_path, fd_queue, notify_tx));
     }
 
-    let mut rt = RuntimeBuilder::<IoUringDriver>::new()
+    let mut rt = RuntimeBuilder::<FusionDriver>::new()
         .with_entries(1024)
         .build()
         .expect("build monoio runtime");

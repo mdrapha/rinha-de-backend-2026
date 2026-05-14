@@ -13,16 +13,18 @@ fn main() {
             let upstreams = cfg.upstreams.clone();
             let port = cfg.port;
             std::thread::spawn(move || {
+                let listener_std = make_listener(port);
+
                 let ctrl_fds: Vec<libc::c_int> = upstreams
                     .iter()
                     .map(|path| socket::connect_ctrl(&format!("{path}.ctrl")))
                     .collect();
 
-                monoio::RuntimeBuilder::<monoio::IoUringDriver>::new()
+                let mut rt = monoio::RuntimeBuilder::<monoio::FusionDriver>::new()
                     .with_entries(4096)
                     .build()
-                    .expect("failed to build IoUring runtime")
-                    .block_on(accept_loop(port, ctrl_fds))
+                    .expect("failed to build monoio runtime");
+                rt.block_on(accept_loop_std(listener_std, ctrl_fds))
             })
         })
         .collect();
@@ -43,8 +45,8 @@ fn make_listener(port: u16) -> std::net::TcpListener {
     sock.into()
 }
 
-async fn accept_loop(port: u16, ctrl_fds: Vec<libc::c_int>) {
-    let listener = TcpListener::from_std(make_listener(port)).expect("TcpListener::from_std");
+async fn accept_loop_std(listener_std: std::net::TcpListener, ctrl_fds: Vec<libc::c_int>) {
+    let listener = TcpListener::from_std(listener_std).expect("TcpListener::from_std");
     let len = ctrl_fds.len();
     let mut rr: usize = 0;
     loop {

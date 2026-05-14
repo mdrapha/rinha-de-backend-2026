@@ -5,6 +5,7 @@ services:
       target: api
     environment:
       - SOCK=/run/sock/api1.sock
+      - MONOIO_FORCE_LEGACY_DRIVER=1
     volumes:
       - sock:/run/sock
     deploy:
@@ -25,6 +26,7 @@ services:
       target: api
     environment:
       - SOCK=/run/sock/api2.sock
+      - MONOIO_FORCE_LEGACY_DRIVER=1
     volumes:
       - sock:/run/sock
     deploy:
