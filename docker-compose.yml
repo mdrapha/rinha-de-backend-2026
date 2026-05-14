@@ -3,6 +3,7 @@ services:
     image: ghcr.io/mdrapha/rinha-backend-2026:latest
     environment:
       - SOCK=/run/sock/api1.sock
+      - MONOIO_FORCE_LEGACY_DRIVER=1
     volumes:
       - sock:/run/sock
     deploy:
@@ -21,6 +22,7 @@ services:
     image: ghcr.io/mdrapha/rinha-backend-2026:latest
     environment:
       - SOCK=/run/sock/api2.sock
+      - MONOIO_FORCE_LEGACY_DRIVER=1
     volumes:
       - sock:/run/sock
     deploy:
