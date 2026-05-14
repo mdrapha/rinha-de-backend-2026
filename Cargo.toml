@@ -2,22 +2,40 @@
 name = "rinha-backend-2026"
 version = "0.1.0"
 edition = "2021"
+publish = false
 
 [[bin]]
 name = "rinha"
 path = "src/main.rs"
 
+[[bin]]
+name = "proxy"
+path = "src/proxy.rs"
+
+[[bin]]
+name = "build_index"
+path = "src/build_index.rs"
+
 [dependencies]
-axum = "0.7"
-tokio = { version = "1", features = ["rt", "net"] }
+monoio = { version = "0.2", default-features = false, features = ["iouring", "legacy", "macros"] }
+memchr = "2"
+mimalloc = { version = "0.1", default-features = false }
+aligned-vec = "0.6"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-half = "2"
-flate2 = "1"
+libc = "0.2"
+socket2 = "0.5"
 
 [profile.release]
 opt-level = 3
-lto = true
+lto = "fat"
 codegen-units = 1
-panic = "abort"
 strip = true
+panic = "abort"
+debug = 0
+overflow-checks = false
+incremental = false
+
+[profile.release.package."*"]
+opt-level = 3

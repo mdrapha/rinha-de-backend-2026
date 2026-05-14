@@ -1,5 +1,6 @@
 /target
 Cargo.lock
-*.bin
 /data
 /resources
+*.bin
+*.bin.gz
