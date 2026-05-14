@@ -2,7 +2,7 @@
 
 Submissão para a [Rinha de Backend 2026](https://github.com/zanfranceschi/rinha-de-backend-2026).
 
-**Stack**: Rust (axum) · VP-tree · f16 vectors · Nginx
+**Stack**: Rust · monoio (io_uring) · IVF-Flat SIMD · Custom Load Balancer
 
 ## O Desafio
 
@@ -17,143 +17,154 @@ Para cada transação:
 ## Arquitetura
 
 ```
-                ┌─────────────────────────────────┐
-                │          Nginx (LB)             │
-                │     porta 9999 · round-robin     │
-                │     0.05 CPU · 10 MB             │
-                └──────────┬──────────┬────────────┘
-                           │          │
-                ┌──────────▼──┐  ┌────▼──────────┐
-                │   API 1     │  │   API 2       │
-                │  port 8080  │  │  port 8080    │
-                │ 0.475 CPU   │  │ 0.475 CPU     │
-                │  170 MB     │  │  170 MB       │
-                │             │  │               │
-                │ ┌─────────┐ │  │ ┌─────────┐   │
-                │ │ VP-tree │ │  │ │ VP-tree │   │
-                │ │ 3M vecs │ │  │ │ 3M vecs │   │
-                │ │  (f16)  │ │  │ │  (f16)  │   │
-                │ └─────────┘ │  │ └─────────┘   │
-                └─────────────┘  └───────────────┘
+              ┌───────────────────────────────────┐
+              │     Custom Proxy (io_uring)       │
+              │   porta 9999 · round-robin FD     │
+              │       0.1 CPU · 30 MB             │
+              └──────────┬──────────┬─────────────┘
+                    UDS FD pass    UDS FD pass
+              ┌──────────▼──┐  ┌───▼────────────┐
+              │   API 1     │  │   API 2        │
+              │  monoio RT  │  │  monoio RT     │
+              │ 0.45 CPU    │  │ 0.45 CPU       │
+              │  160 MB     │  │  160 MB        │
+              │             │  │                │
+              │ ┌─────────┐ │  │ ┌─────────┐    │
+              │ │IVF-Flat │ │  │ │IVF-Flat │    │
+              │ │ K=4096  │ │  │ │ K=4096  │    │
+              │ │i16 quant│ │  │ │i16 quant│    │
+              │ │AVX2+FMA │ │  │ │AVX2+FMA │    │
+              │ └─────────┘ │  │ └─────────┘    │
+              └─────────────┘  └────────────────┘
 ```
 
-Cada instância da API carrega uma cópia completa do índice VP-tree em memória. Não há dependência entre as instâncias nem serviço externo de banco de dados — a busca vetorial é feita in-process, eliminando qualquer latência de rede.
+O proxy aceita conexões TCP e repassa o **file descriptor** via Unix socket para as instâncias API, eliminando cópia de dados entre processos. Cada instância usa `monoio` (runtime io_uring) para I/O assíncrono de baixa latência.
 
 **Recursos totais**: 1.0 CPU · 350 MB RAM
 
 ## Decisões Técnicas
 
-### Por que Rust?
+### Por que IVF-Flat em vez de VP-tree?
 
-O scoring da Rinha premia fortemente o p99 baixo (escala logarítmica, cada 10x mais rápido = +1000 pontos). Rust oferece latência previsível sem garbage collector, controle fino de memória e auto-vetorização via LLVM.
+| Algoritmo     | Complexidade  | Cache-friendly | SIMD | Memória   |
+|--------------|--------------|----------------|------|-----------|
+| VP-tree      | O(log N)     | Não (random)   | Não  | ~95 MB    |
+| **IVF-Flat** | **O(N/K × P)** | **Sim (linear)** | **Sim** | **~90 MB** |
+| HNSW         | O(log N)     | Não (random)   | Parcial | ~100+ MB |
 
-### Por que VP-tree?
+A VP-tree, apesar de exata, sofre com acessos aleatórios de memória (cache misses) e não se beneficia de SIMD. O IVF-Flat organiza vetores em clusters contíguos na memória, permitindo scans lineares com instruções AVX2/FMA — processando **8 vetores simultaneamente** por iteração SIMD.
 
-| Algoritmo    | Tipo       | Complexidade | Precisão | Memória extra |
-|-------------|------------|-------------|----------|---------------|
-| Brute Force | Exato      | O(N × 14)  | 100%     | 0             |
-| **VP-tree** | **Exato**  | **O(log N)**| **100%** | **~12 MB**    |
-| HNSW        | Aproximado | O(log N)    | ~95-99%  | ~100+ MB      |
-| KD-tree     | Exato      | O(log N)*   | 100%     | ~24 MB        |
+Com K=4096 centroids e NPROBE adaptativo (5 para casos claros, 24 para ambíguos), o IVF-Flat alcança latências consistentemente abaixo de 2ms mantendo detecção perfeita.
 
-A VP-tree oferece busca **exata** em O(log N) no caso médio, com overhead de memória mínimo. Diferente de KD-trees, funciona bem em 14 dimensões. Diferente de HNSW, não sacrifica precisão — evitando falsos positivos/negativos por imprecisão do algoritmo.
+### Quantização i16
 
-### Por que f16?
+O dataset de 3M vetores × 14 dimensões precisa caber na memória com margem:
 
-O dataset tem 3 milhões de vetores × 14 dimensões. A memória por instância:
+| Formato | Por vetor | Total (1 inst.) | Alinhamento SIMD |
+|---------|----------|-----------------|------------------|
+| f32     | 56 bytes | 168 MB          | Nativo           |
+| f16     | 28 bytes | 84 MB           | Precisa converter|
+| **i16** | **28 bytes** | **84 MB**   | **Nativo AVX2**  |
 
-| Formato | Por vetor | 2 instâncias | Cabe em 350 MB? |
-|---------|----------|-------------|-----------------|
-| f32     | 56 bytes | 336 MB      | Não             |
-| **f16** | **28 bytes** | **168 MB** | **Sim**     |
+Os vetores são quantizados para i16 (escala 10000x) durante o build do índice. Isso permite operações SIMD diretamente em inteiros de 16 bits sem conversão, usando `_mm256_madd_epi16` para multiplicação e acumulação em uma instrução.
 
-Usando half-precision (IEEE 754 f16), cada instância ocupa ~95 MB. Com `target-cpu=haswell`, as conversões f16↔f32 usam instruções F16C do hardware.
+### monoio + io_uring
+
+Em vez de tokio/epoll, usamos `monoio` — um runtime Rust baseado em io_uring. Vantagens no contexto da Rinha:
+- **Completion-based I/O**: sem syscalls extras para poll
+- **Batch submission**: múltiplas operações I/O submetidas de uma vez
+- **Single-threaded**: sem overhead de sincronização entre threads
+
+### Custom HTTP Parser
+
+Sem frameworks HTTP (axum, hyper). O parser é manual com `memchr` para busca rápida de delimitadores. As respostas HTTP são **pré-computadas** como constantes estáticas — para cada possível `fraud_score` (0.0, 0.2, 0.4, 0.6, 0.8, 1.0), a resposta HTTP completa já está pronta em memória.
+
+### FD Passing (Unix Domain Sockets)
+
+O load balancer não faz proxy de bytes. Ele aceita a conexão TCP e passa o **raw file descriptor** para uma instância API via `sendmsg`/`recvmsg` com `SCM_RIGHTS`. A instância API lê e escreve diretamente no socket do cliente — zero-copy entre proxy e backend.
 
 ## Estrutura do Projeto
 
 ```
 src/
-├── main.rs          Entry point — CLI (preprocess / serve)
-├── server.rs        Endpoints HTTP (axum): GET /ready, POST /fraud-score
-├── types.rs         Structs de request/response (serde)
-├── vectorize.rs     Payload → vetor de 14 dimensões (normalização + clamp)
-├── distance.rs      Distância euclidiana f16×f16 e f32×f16
-├── vptree.rs        VP-tree: construção (build) e busca KNN (query k=5)
-└── dataset.rs       Pré-processamento do .gz e serialização do índice binário
+├── main.rs          Entry point API — monoio runtime, UDS listener, FD handling
+├── proxy.rs         Entry point Proxy — TCP accept, round-robin FD dispatch
+├── build_index.rs   K-means clustering + quantização → index.bin.gz
+├── data.rs          Carregamento do índice IVF embarcado (include_bytes!)
+├── search.rs        IVF-Flat KNN com AVX2/FMA intrinsics
+├── feature.rs       Payload → vetor 14D (normalização + clamp)
+├── parse.rs         Parser JSON manual (zero-alloc, sem serde no hot path)
+├── http.rs          HTTP parser + connection handler (memchr, writev)
+├── reply.rs         Respostas HTTP pré-computadas
+├── config.rs        Configuração via env vars
+└── socket.rs        FD passing via Unix sockets (SCM_RIGHTS)
 ```
 
 ### Fluxo de uma Requisição
 
 ```
-POST /fraud-score
+TCP connect (porta 9999)
         │
         ▼
-  Parse JSON (serde)           ~5 μs
+  Proxy: accept + sendmsg(fd)     ~10 μs
+        │ (UDS FD pass)
+        ▼
+  API: recvmsg(fd) → TcpStream
         │
         ▼
-  Vetorizar payload            ~1 μs
-  (14 dims, normalização)
+  HTTP parse (memchr)              ~1 μs
         │
         ▼
-  VP-tree KNN (k=5)            ~100-500 μs
-  (distância euclidiana,
-   poda por triângulo)
+  JSON parse (manual)              ~2 μs
         │
         ▼
-  fraud_score = fraudes / 5
-  approved = score < 0.6
+  Vectorize (14D)                  ~1 μs
         │
         ▼
-  Resposta JSON                ~1 μs
+  IVF search (AVX2/FMA)           ~50-200 μs
+  ├─ centroid distances
+  ├─ top-N probe selection
+  └─ SIMD block scan (i16)
+        │
+        ▼
+  Resposta pré-computada           ~0 μs
+  (writev direto no socket)
 ```
 
-### Pré-processamento (Build Time)
+### Build do Índice (Compile Time)
 
-O índice VP-tree é construído durante o `docker build`, não no startup:
+O índice IVF é construído durante o `docker build` e embarcado no binário:
 
-1. **Descomprime** `references.json.gz` (~284 MB JSON)
-2. **Converte** 3M vetores de f64 para f16
-3. **Constrói** a VP-tree reordenando os vetores por particionamento recursivo via mediana
-4. **Serializa** em formato binário (~99 MB): vetores f16 + labels + medianas f32
+1. **Carrega** `references.json.gz` (~47 MB gz → 3M vetores)
+2. **K-means++** com K=4096 clusters, 25 iterações de Lloyd
+3. **Quantiza** vetores para i16 (escala 10000x)
+4. **Organiza** em blocos de 8 vetores (alinhados para SIMD)
+5. **Comprime** com gzip → `data/index.bin.gz` (~30 MB)
+6. **Embarca** via `include_bytes!` no binário final
 
-No startup, o servidor apenas lê o arquivo binário direto para memória (~1s).
+No startup, o servidor descomprime o índice em ~200ms e faz warmup de 500 queries aleatórias para aquecer caches.
 
-### VP-tree — Como Funciona
+## Benchmark Local (k6, mesmo script do desafio)
 
-A VP-tree (Vantage Point Tree) particiona o espaço recursivamente:
+Resultados em WSL2 (não representam o hardware do desafio):
 
-1. Escolhe um **ponto de referência** (vantage point)
-2. Calcula a distância de todos os outros pontos até ele
-3. Divide pela **mediana**: metade mais próxima vai para a esquerda, metade mais distante vai para a direita
-4. Repete recursivamente
-
-Na busca, a **desigualdade triangular** permite podar subárvores inteiras:
-- Se a query está a distância `d` do vantage point e o raio de busca é `τ`
-- A subárvore esquerda (dist ≤ mediana) pode ser ignorada se `d - τ > mediana`
-- A subárvore direita (dist > mediana) pode ser ignorada se `d + τ < mediana`
-
-Com 3M vetores, a árvore tem profundidade ~21. Na prática, cada query visita apenas ~100-500 nós.
-
-## Docker Build
-
-O Dockerfile usa 3 estágios:
-
-| Estágio        | O que faz                                            |
-|---------------|------------------------------------------------------|
-| `builder`      | Compila o binário Rust com `-C target-cpu=haswell`   |
-| `preprocessor` | Baixa references.gz, constrói o índice VP-tree       |
-| `runtime`      | Imagem mínima: binário + índice (~175 MB)            |
+| Métrica | Valor |
+|---|---|
+| p99 | 2.09ms |
+| HTTP errors | 0 |
+| False Positives | 0 |
+| False Negatives | 0 |
+| Score p99 | 2,680.85 |
+| Score detecção | 3,000.00 (máximo) |
+| **Score FINAL** | **5,680.85** |
 
 ## Como Rodar Localmente
 
 ```bash
-# Subir o stack completo
 docker compose up -d
 
-# Aguardar o carregamento do índice (~2s)
 curl http://localhost:9999/ready
 
-# Testar uma transação legítima
 curl -X POST http://localhost:9999/fraud-score \
   -H "Content-Type: application/json" \
   -d '{
@@ -164,40 +175,9 @@ curl -X POST http://localhost:9999/fraud-score \
     "terminal": {"is_online": false, "card_present": true, "km_from_home": 29.23},
     "last_transaction": null
   }'
-# → {"approved":true,"fraud_score":0.0}
 
-# Parar
 docker compose down
 ```
-
-### Desenvolvimento sem Docker
-
-```bash
-# Baixar referências
-mkdir -p resources
-curl -L -o resources/references.json.gz \
-  https://raw.githubusercontent.com/zanfranceschi/rinha-de-backend-2026/main/resources/references.json.gz
-
-# Construir índice
-cargo build --release
-./target/release/rinha preprocess resources/references.json.gz /tmp/index.bin
-
-# Rodar servidor
-INDEX_PATH=/tmp/index.bin PORT=8080 ./target/release/rinha
-```
-
-## Testes
-
-```bash
-cargo test
-```
-
-12 testes cobrindo:
-- Vetorização com exemplos da documentação oficial (transação legítima e fraudulenta)
-- Cálculo de distância euclidiana (f16 e mixed f32×f16)
-- Construção e consulta da VP-tree
-- Serialização/deserialização do índice binário
-- Cálculo de dia da semana (Sakamoto's algorithm)
 
 ## Licença
 

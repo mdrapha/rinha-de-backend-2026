@@ -1,5 +1,5 @@
 services:
-  api1: &api
+  api1:
     build:
       context: .
       target: api
@@ -20,11 +20,24 @@ services:
       - seccomp:unconfined
 
   api2:
-    <<: *api
-    build: !reset null
-    image: rinha-backend-2026-api1
+    build:
+      context: .
+      target: api
     environment:
       - SOCK=/run/sock/api2.sock
+    volumes:
+      - sock:/run/sock
+    deploy:
+      resources:
+        limits:
+          cpus: "0.45"
+          memory: "160M"
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    security_opt:
+      - seccomp:unconfined
 
   lb:
     build:
